@@ -188,7 +188,6 @@ conf = Config({
     'qpack': '.qpack',
     'qubits': '.qubits',
     'qspace': '.qspace',
-    'ignore': '.gitignore',
     'interval': 2,
     'stalled': 100,
     'jobroot': '/mnt',
@@ -299,8 +298,8 @@ def make(targets=(), conf=conf, rules=rules):
 def pack(targets=(), conf=conf):
     qp = conf['qpack']
     qs = conf['qubits']
-    def ignored(path, globs=[l.strip() for l in open(conf['ignore'])]):
-        return any(fnmatch(path, i) for i in globs)
+    def ignored(path, globs=[l.strip() for l in conf.expand('ignore', [])]):
+        return any(fnmatch(path, i) for i in globs + ['*.pyc', '.q*', 'Qfilec'])
     def ignore(dir, names):
         return [n for n in names if ignored(n) or dotfile(n) or n == qp]
     if os.path.exists(qp):
