@@ -331,7 +331,7 @@ def spawn(jobid, qpack=None, conf=conf, rules=rules):
         if conf.get('verbose'):
             flags += ' -v'
         def plant(targets):
-            return '(nohup ./qb seed %s %s >> %s 2>&1 &)' % (flags, ' '.join(targets), sl)
+            return '(nohup ./qb.py seed %s %s >> %s 2>&1 &)' % (flags, ' '.join(targets), sl)
         pssh(((addr, 'cd %s; %s; echo ok' %
                (conf.jobdir(job.id), '; '.join(plant(ts) for _addr, ts in group if ts)))
               for addr, group in groupby(ps, lambda (k, v): k)))
