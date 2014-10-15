@@ -374,10 +374,10 @@ def cli_pack(*targets):
     print(pack(targets))
 
 def cli_seed(*targets):
-    seed(targets)
+    print(seed(targets))
 
 def cli_spawn(jobid, qpack=None):
-    spawn(jobid, qpack=None)
+    print(spawn(jobid, qpack=None))
 
 def cli_share(qpack=None):
     print(share(qpack))
@@ -386,7 +386,7 @@ def cli_kill(jobish=None, signal=None):
     kill(jobish, signal)
 
 def cli_run(*targets):
-    run(targets)
+    print(run(targets))
 
 def cli_help(*args):
     print(__doc__.strip())
