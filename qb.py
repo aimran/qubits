@@ -86,7 +86,7 @@ class Job(object):
 
     def __enter__(self):
         if not self.id:
-            self.id = uuid.uuid1().hex
+            self.id = time.strftime('%Y%m%d-%H%M%S-') + uuid.uuid4().hex
         self.jobspace.subspace(self.id)
         return self
 
