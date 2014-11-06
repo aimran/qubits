@@ -176,8 +176,8 @@ class Config(dict):
         maybe = self.get(key, default)
         return maybe() if callable(maybe) else maybe
 
-    def jobdir(self, id):
-        id = id or self.get('jobid')
+    def jobdir(self, id=None):
+        id = id or self['jobid']
         return os.path.join(self['jobroot'], self.get('jobprefix', '') + id)
 
     def jobspace(self, url=None):
