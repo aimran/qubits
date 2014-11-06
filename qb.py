@@ -80,18 +80,20 @@ def dotfile(path):
     return os.path.basename(path).startswith('.')
 
 class Job(object):
-    def __init__(self, jobspace, id=None):
-        self.jobspace = jobspace
+    def __init__(self, conf, id=None):
+        self.conf = conf
+        self.jobspace = conf.jobspace()
         self.id = id
 
     def __enter__(self):
         if not self.id:
             self.id = time.strftime('%Y%m%d-%H%M%S-') + uuid.uuid4().hex
+        self.conf['jobid'] = self.id
         self.jobspace.subspace(self.id)
         return self
 
     def __exit__(self, *args):
-        pass # cleanup
+        self.conf.pop('jobid') # cleanup
 
     def status(self, qubit, qbdict):
         i, o = self.punch_count(qubit)
@@ -175,6 +177,7 @@ class Config(dict):
         return maybe() if callable(maybe) else maybe
 
     def jobdir(self, id):
+        id = id or self.get('jobid')
         return os.path.join(self['jobroot'], self.get('jobprefix', '') + id)
 
     def jobspace(self, url=None):
@@ -291,7 +294,7 @@ def loop(qubits, job, conf=conf):
         idle = 0 if busy else idle + 1
 
 def make(targets=(), conf=conf, rules=rules):
-    with Job(conf.jobspace(), id=conf['parent']) as job:
+    with Job(conf, id=conf['parent']) as job:
         loop(qubits(targets, rules), job, conf=conf)
     return job.id
 
@@ -312,7 +315,7 @@ def pack(targets=(), conf=conf):
 def seed(targets=(), conf=conf, rules=rules):
     qd = dict(qbread(open(conf['qubits']), rules=rules))
     ts = chain(targets, (t for t in qd if t not in targets))
-    with Job(conf.jobspace(), id=conf['parent']) as job:
+    with Job(conf, id=conf['parent']) as job:
         loop(((t, qd[t]) for t in ts), job)
     return job.id
 
@@ -324,7 +327,7 @@ def spawn(jobid, qpack=None, conf=conf, rules=rules):
     qs = qbread(open(os.path.join(qp, qs)), rules=rules)
     for n, qubit in enumerate(q for q in qs if not qbdeps(q)):
         ps[n % len(ps)][1].append(qbtarget(qubit))
-    with Job(conf.jobspace(), id=jobid) as job:
+    with Job(conf, id=jobid) as job:
         flags = '-j %s' % job.id
         if conf.get('profile'):
             flags += ' -p %s' % conf['profile']
@@ -339,7 +342,7 @@ def spawn(jobid, qpack=None, conf=conf, rules=rules):
 
 def share(qpack=None, conf=conf):
     qp = qpack or conf['qpack']
-    with Job(conf.jobspace(), id=conf['parent']) as job:
+    with Job(conf, id=conf['parent']) as job:
         pscp(qp + '/',
              ('%s:%s' % (addr, conf.jobdir(job.id))
               for addr, nmax in conf.expand('nodes')),
