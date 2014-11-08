@@ -33,6 +33,10 @@
     copies QPACK to all nodes, unpacks
     returns JOBID
 
+(qb pssh COMMAND) ->
+    ssh each NODE:
+     COMMAND
+
 (qb kill [JOBISH] [SIGNAL]) ->
     ssh each NODE:
      pkill -SIGNAL "qb seed [-j JOBISH]"
@@ -406,6 +410,9 @@ def cli_spawn(jobid, qpack=None):
 
 def cli_share(qpack=None):
     print(share(qpack))
+
+def cli_pssh(command):
+    pssh((addr, command) for addr, _nmax in conf.expand('nodes'))
 
 def cli_kill(jobish=None, signal=None):
     kill(jobish, signal)
