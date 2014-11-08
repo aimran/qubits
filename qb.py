@@ -161,28 +161,29 @@ class FileJobSpace(JobSpace):
                         o += 1
         return i, o
 
-    def subspace(self, id):
-        sh(('mkdir', '-p', os.path.join(self.path, id))).wait()
+    def subspace(self, jobid):
+        sh(('mkdir', '-p', os.path.join(self.path, jobid))).wait()
 
     def last(self):
-        return sorted(os.listdir(self.path))[-1]
+        return sorted(p for p in os.listdir(self.path) if p != '-')[-1]
 
-    def sync(self, id):
+    def sync(self, jobid):
         pass
 
 class S3JobSpace(FileJobSpace):
     def __init__(self, url, *args):
         FileJobSpace.__init__(self, url, *args)
-        self.path = os.path.join(self.qspace, quote_plus(self.url))
+        self.path = os.path.join(self.qspace, '-', quote_plus(self.url))
 
     def sync(self, jobid):
+        worker = quote_plus(self.worker)
+        sh(('aws', 's3', 'cp',
+            os.path.join(self.path, jobid, worker),
+            os.path.join(self.url, jobid, worker))).wait()
         sh(('aws', 's3', 'sync',
-            os.path.join(self.path, jobid, self.worker),
-            os.path.join(self.url, jobid, self.worker)))
-        sh(('aws', 's3', 'sync',
-            '--exclude', self.worker,
+            '--exclude', worker,
             os.path.join(self.url, jobid),
-            os.path.join(self.path, jobid)))
+            os.path.join(self.path, jobid))).wait()
 
 class Config(dict):
     def __call__(self, key):
