@@ -291,6 +291,7 @@ def loop(qubits, job, conf=conf):
                     qbcall(qubit)
                     job.punch_clock(qubit, False)
                     busy = True
+                    break
         idle = 0 if busy else idle + 1
 
 def make(targets=(), conf=conf, rules=rules):
