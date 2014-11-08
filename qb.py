@@ -165,7 +165,7 @@ class FileJobSpace(JobSpace):
         sh(('mkdir', '-p', os.path.join(self.path, id))).wait()
 
     def last(self):
-        return os.listdir(self.path)[-1]
+        return sorted(os.listdir(self.path))[-1]
 
     def sync(self, id):
         pass
