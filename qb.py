@@ -177,10 +177,10 @@ class S3JobSpace(FileJobSpace):
 
     def sync(self, jobid):
         worker = quote_plus(self.worker)
-        sh(('aws', 's3', 'cp',
+        sh(('aws', 's3', 'cp', '--quiet',
             os.path.join(self.path, jobid, worker),
             os.path.join(self.url, jobid, worker))).wait()
-        sh(('aws', 's3', 'sync',
+        sh(('aws', 's3', 'sync', '--quiet',
             '--exclude', worker,
             os.path.join(self.url, jobid),
             os.path.join(self.path, jobid))).wait()
