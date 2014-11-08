@@ -4,6 +4,9 @@
 (qb conf) ->
     print qb conf
 
+(qb last) ->
+    print last jobid
+
 (qb qubits [TARGETS]) ->
     print all the qubits for TARGETS
 
@@ -16,6 +19,9 @@
 (qb seed [TARGETS]) ->
     start making TARGETS from QUBITS_FILE
     continue until QUBITS_FILE complete
+
+(qb sync [JOBID]) ->
+    sync jobspace
 
 (qb spawn [JOBID] [QPACK]) ->
     ssh each NODE:
@@ -153,6 +159,9 @@ class FileJobSpace(JobSpace):
 
     def subspace(self, id):
         sh(('mkdir', '-p', os.path.join(self.path, id))).wait()
+
+    def last(self):
+        return os.listdir(self.path)[-1]
 
     def sync(self, id):
         pass
@@ -320,6 +329,12 @@ def seed(targets=(), conf=conf, rules=rules):
         loop(((t, qd[t]) for t in ts), job)
     return job.id
 
+def sync(jobid=None, conf=conf, rules=rules):
+    jobid = jobid or conf.jobspace().last()
+    with Job(conf, id=jobid) as job:
+        job.sync()
+    return jobid
+
 def spawn(jobid, qpack=None, conf=conf, rules=rules):
     qp = qpack or conf['qpack']
     qs = conf['qubits']
@@ -367,6 +382,9 @@ def cli_conf():
     for k in sorted(conf):
         print('%12s:\t%r' % (k, conf.expand(k)))
 
+def cli_last():
+    print(conf.jobspace().last())
+
 def cli_qubits(*targets):
     for qubit in qubits(targets):
         sys.stdout.write(qbformat(qubit))
@@ -379,6 +397,9 @@ def cli_pack(*targets):
 
 def cli_seed(*targets):
     print(seed(targets))
+
+def cli_sync(qpack=None):
+    print(sync(qpack))
 
 def cli_spawn(jobid, qpack=None):
     print(spawn(jobid, qpack=None))
