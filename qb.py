@@ -55,6 +55,7 @@ import uuid
 
 from fnmatch import fnmatch
 from itertools import chain, groupby
+from random import sample
 from shutil import copytree, rmtree
 from subprocess import Popen, PIPE
 from urllib import quote_plus
@@ -297,7 +298,7 @@ def loop(qubits, job, conf=conf):
         if idle:
             time.sleep(interval)
         job.sync()
-        for qubit in qubits:
+        for qubit in sample(qubits, len(qubits)):
             target = qubit[0]
             if target in targets:
                 stat, (i, o) = job.status(qubit, qbdict)
