@@ -61,12 +61,15 @@ from subprocess import Popen, PIPE
 from urllib import quote_plus
 from warnings import warn
 
-def log(o):
-    if conf.get('verbose'):
+def verbosity(level):
+    return conf.get('verbose') >= level
+
+def log(o, v=1):
+    if verbosity(v):
         sys.stderr.write(str(o) + '\n')
 
 def sh(cmd, *args, **opts):
-    log("Calling %s with %s and %s" % (cmd, args, opts))
+    log("Calling %s with %s and %s" % (cmd, args, opts), 2)
     return Popen(cmd, *args, **opts)
 
 def cat(data, proc):
@@ -75,13 +78,13 @@ def cat(data, proc):
     proc.wait()
 
 def pscp(src, dsts, scp='scp', P=16):
-    xargs = ('xargs', '-t') if conf.get('verbose') else ('xargs',)
+    xargs = ('xargs', '-t') if verbosity(2) else ('xargs',)
     scp = scp + ' -v' if conf.get('verbose') else scp + ' -q'
     proc = sh(xargs + ('-L', '1', '-P', str(P), 'bash', '-c', "%s $1 $2" % scp, '-'), stdin=PIPE)
     cat('\n'.join('%s\t%s' % (src, dst) for dst in dsts), proc)
 
 def pssh(orders, ssh='ssh', P=16):
-    xargs = ('xargs', '-t') if conf.get('verbose') else ('xargs',)
+    xargs = ('xargs', '-t') if verbosity(2) else ('xargs',)
     fmt = r"\e[35m@: %s \e[0m\n%s\n\e[36m?: %s\e[0m\n"
     enc = r"printf \"%s\" $1 \"\`(${*:2}) 2>&1\`\" \$?" % fmt
     proc = sh(xargs + ('-L', '1', '-P', str(P), 'bash', '-c', "%s $1 \"%s\"" % (ssh, enc), '-'), stdin=PIPE)
@@ -114,8 +117,8 @@ class Job(object):
             return 'ready', (i, o)
         return 'waiting', (i, o)
 
-    def sync(self):
-        return self.jobspace.sync(self.id)
+    def sync(self, up=False, down=False):
+        return self.jobspace.sync(self.id, up, down)
 
     def punch_clock(self, qubit, inout):
         return self.jobspace.punch_clock(self.id, qubit, inout)
@@ -144,14 +147,15 @@ class FileJobSpace(JobSpace):
         JobSpace.__init__(self, url, *args)
         self.path = self.url
 
-    def punch_clock(self, sub, qubit, inout):
-        with open(os.path.join(self.path, sub, quote_plus(self.worker)), 'a') as clock:
+    def punch_clock(self, jobid, qubit, inout):
+        with open(os.path.join(self.path, jobid, quote_plus(self.worker)), 'a') as clock:
             clock.write('%s\t%s\t%d\n' % (time.time(), qbtarget(qubit), inout))
+        self.sync(jobid, up=True, down=False)
 
-    def punch_count(self, sub, qubit):
+    def punch_count(self, jobid, qubit):
         i, o = 0, 0
         target = qbtarget(qubit)
-        subdir = os.path.join(self.path, sub)
+        subdir = os.path.join(self.path, jobid)
         for worker in os.listdir(subdir):
             for line in open(os.path.join(subdir, worker)):
                 t, target_, inout = line.strip().split('\t')
@@ -168,7 +172,7 @@ class FileJobSpace(JobSpace):
     def last(self):
         return sorted(p for p in os.listdir(self.path) if p != '-')[-1]
 
-    def sync(self, jobid):
+    def sync(self, jobid, up, down):
         pass
 
 class S3JobSpace(FileJobSpace):
@@ -176,15 +180,19 @@ class S3JobSpace(FileJobSpace):
         FileJobSpace.__init__(self, url, *args)
         self.path = os.path.join(self.qspace, '-', quote_plus(self.url))
 
-    def sync(self, jobid):
+    def sync(self, jobid, up, down):
         worker = quote_plus(self.worker)
-        sh(('aws', 's3', 'cp', '--quiet',
-            os.path.join(self.path, jobid, worker),
-            os.path.join(self.url, jobid, worker))).wait()
-        sh(('aws', 's3', 'sync', '--quiet',
-            '--exclude', worker,
-            os.path.join(self.url, jobid),
-            os.path.join(self.path, jobid))).wait()
+        if up:
+            sh(('aws', 's3', 'cp', ) +
+               (() if verbosity(2) else ('--quiet', )) +
+               (os.path.join(self.path, jobid, worker),
+                os.path.join(self.url, jobid, worker))).wait()
+        if down:
+            sh(('aws', 's3', 'sync', ) +
+               (() if verbosity(2) else ('--quiet', )) +
+               ('--exclude', worker,
+                os.path.join(self.url, jobid),
+                os.path.join(self.path, jobid))).wait()
 
 class Config(dict):
     def __call__(self, key):
@@ -286,7 +294,7 @@ def qubits_(target, qubits=None, ancestors=(), rules=rules):
 def qubits(targets=(), rules=rules):
     return sum((qubits_(t, rules=rules).items() for t in targets or ('default',)), [])
 
-def loop(qubits, job, conf=conf):
+def loop(qubits, job):
     idle = 0
     stalled = conf['stalled']
     interval = conf['interval']
@@ -297,8 +305,8 @@ def loop(qubits, job, conf=conf):
         busy = False
         if idle:
             time.sleep(interval)
-        job.sync()
-        for qubit in sample(qubits, len(qubits)):
+        job.sync(down=True)
+        for qubit in qubits:
             target = qubit[0]
             if target in targets:
                 stat, (i, o) = job.status(qubit, qbdict)
@@ -315,12 +323,12 @@ def loop(qubits, job, conf=conf):
                     break
         idle = 0 if busy else idle + 1
 
-def make(targets=(), conf=conf, rules=rules):
+def make(targets=()):
     with Job(conf, id=conf['parent']) as job:
-        loop(qubits(targets, rules), job, conf=conf)
+        loop(qubits(targets, rules), job)
     return job.id
 
-def pack(targets=(), conf=conf):
+def pack(targets=()):
     qp = conf['qpack']
     qs = conf['qubits']
     def ignored(path, globs=[l.strip() for l in conf.expand('ignore', [])]):
@@ -334,25 +342,26 @@ def pack(targets=(), conf=conf):
         file.write(qbdumps(qubits(targets)))
     return qp
 
-def seed(targets=(), conf=conf, rules=rules):
-    qd = dict(qbread(open(conf['qubits']), rules=rules))
-    ts = chain(targets, (t for t in qd if t not in targets))
+def seed(targets=()):
+    qd = dict(qbread(open(conf['qubits'])))
+    qb = [t for t in qd if t not in targets]
+    ts = chain(targets, sample(qb, len(qb)))
     with Job(conf, id=conf['parent']) as job:
         loop(((t, qd[t]) for t in ts), job)
     return job.id
 
-def sync(jobid=None, conf=conf, rules=rules):
+def sync(jobid=None):
     jobid = jobid or conf.jobspace().last()
     with Job(conf, id=jobid) as job:
-        job.sync()
+        job.sync(down=True)
     return jobid
 
-def spawn(jobid, qpack=None, conf=conf, rules=rules):
+def spawn(jobid, qpack=None):
     qp = qpack or conf['qpack']
     qs = conf['qubits']
     sl = conf['spawnlog']
     ps = sum(([(addr, [])] * nmax for addr, nmax in conf.expand('nodes')), [])
-    qs = qbread(open(os.path.join(qp, qs)), rules=rules)
+    qs = qbread(open(os.path.join(qp, qs)))
     for n, qubit in enumerate(q for q in qs if not qbdeps(q)):
         ps[n % len(ps)][1].append(qbtarget(qubit))
     with Job(conf, id=jobid) as job:
@@ -360,7 +369,7 @@ def spawn(jobid, qpack=None, conf=conf, rules=rules):
         if conf.get('profile'):
             flags += ' -p %s' % conf['profile']
         if conf.get('verbose'):
-            flags += ' -v'
+            flags += ' -' + 'v' * conf['verbose']
         def plant(targets):
             return '(nohup ./qb.py seed %s %s >> %s 2>&1 &)' % (flags, ' '.join(targets), sl)
         pssh(((addr, 'cd %s; %s; echo ok' %
@@ -368,7 +377,7 @@ def spawn(jobid, qpack=None, conf=conf, rules=rules):
               for addr, group in groupby(ps, lambda (k, v): k)))
     return jobid
 
-def share(qpack=None, conf=conf):
+def share(qpack=None):
     qp = qpack or conf['qpack']
     with Job(conf, id=conf['parent']) as job:
         pscp(qp + '/',
@@ -377,7 +386,7 @@ def share(qpack=None, conf=conf):
              scp='rsync -az')
     return job.id
 
-def kill(jobish=None, signal='KILL', conf=conf):
+def kill(jobish=None, signal='KILL'):
     flags = ('-j %s' % jobish) if jobish else ''
     pssh((addr, r'pkill -%s -f \"qb.py seed %s\"' % (signal or 'KILL',  flags))
          for addr, _nmax in conf.expand('nodes'))
@@ -442,7 +451,7 @@ def main():
     parser.add_argument('-p', '--profile',
                         help="the profile of the config")
     parser.add_argument('-v', '--verbose',
-                        action='store_true',
+                        action='count',
                         help="enable verbose output")
     opts, args = parser.parse_known_args(sys.argv[1:])
     cmd, args = args[0] if args else 'help', args[1:]
