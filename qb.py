@@ -388,7 +388,8 @@ def share(qpack=None):
 
 def kill(jobish=None, signal='KILL'):
     flags = ('-j %s' % jobish) if jobish else ''
-    pssh((addr, r'pkill -%s -f \"qb.py seed %s\"' % (signal or 'KILL',  flags))
+    match = r'\"qb.py seed %s\"' % flags
+    pssh((addr, r'ps x -o \"%%r,%%a\" | grep %s | grep -v grep | cut -f 1 -d , | xargs -n 1 pkill -e -%s -g' % (match, signal or 'KILL'))
          for addr, _nmax in conf.expand('nodes'))
 
 def run(targets=()):
