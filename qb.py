@@ -221,7 +221,7 @@ conf = Config({
     'qubits': '.qubits',
     'qspace': '.qspace',
     'interval': 2,
-    'stalled': 100,
+    'stalled': 500,
     'jobroot': '/mnt',
     'jobprefix': 'qjob-',
     'nodes': [('localhost', 2)],
