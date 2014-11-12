@@ -55,9 +55,10 @@ import uuid
 
 from fnmatch import fnmatch
 from itertools import chain, groupby
-from random import sample
+from random import randint, sample
 from shutil import copytree, rmtree
 from subprocess import Popen, PIPE
+from traceback import format_exc
 from urllib import quote_plus
 from warnings import warn
 
@@ -93,6 +94,9 @@ def pssh(orders, ssh='ssh', P=16):
 def dotfile(path):
     return os.path.basename(path).startswith('.')
 
+class Reject(Exception):
+    pass
+
 class Job(object):
     def __init__(self, conf, id=None):
         self.conf = conf
@@ -110,12 +114,17 @@ class Job(object):
         self.conf.pop('jobid') # cleanup
 
     def status(self, qubit, qbdict):
-        i, o = self.punch_count(qubit)
+        i, o, e = self.punch_count(qubit)
         if o:
-            return 'up-to-date', (i, o)
-        if all(self.status((d, qbdict[d]), qbdict)[0] == 'up-to-date' for d in qbdeps(qubit)):
-            return 'ready', (i, o)
-        return 'waiting', (i, o)
+            return 'completed', (i, o, e)
+        if i == e == conf.expand('failed'):
+            return 'failed', (i, o, e)
+        statii = [self.status((d, qbdict[d]), qbdict) for d in qbdeps(qubit)]
+        if all(stat == 'completed' for stat, _ in statii):
+            return 'ready', (i, o, e)
+        if any(stat == 'failed' for stat, _ in statii):
+            return 'blocked', (i, o, e)
+        return 'waiting', (i, o, e)
 
     def sync(self, up=False, down=False):
         return self.jobspace.sync(self.id, up, down)
@@ -153,7 +162,7 @@ class FileJobSpace(JobSpace):
         self.sync(jobid, up=True, down=False)
 
     def punch_count(self, jobid, qubit):
-        i, o = 0, 0
+        i, o, e = 0, 0, 0
         target = qbtarget(qubit)
         subdir = os.path.join(self.path, jobid)
         for worker in os.listdir(subdir):
@@ -162,9 +171,11 @@ class FileJobSpace(JobSpace):
                 if target == target_:
                     if inout == '1':
                         i += 1
+                    elif inout == '-1':
+                        e += 1
                     else:
                         o += 1
-        return i, o
+        return i, o, e
 
     def subspace(self, jobid):
         sh(('mkdir', '-p', os.path.join(self.path, jobid))).wait()
@@ -220,8 +231,9 @@ conf = Config({
     'qpack': '.qpack',
     'qubits': '.qubits',
     'qspace': '.qspace',
-    'interval': 3,
-    'stalled': 500,
+    'failed': lambda: sum(nmax for _, nmax in conf.expand('nodes')),
+    'interval': 10,
+    'stalled': 100,
     'jobroot': '/mnt',
     'jobprefix': 'qjob-',
     'nodes': [('localhost', 2)],
@@ -301,24 +313,32 @@ def loop(qubits, job):
     qubits = list(qubits)
     qbdict = dict(qubits)
     targets = set(t for t, _ in qubits)
-    while targets:
+    rejects = set()
+    while targets - rejects:
         busy = False
         if idle:
-            time.sleep(interval)
+            time.sleep(interval + randint(0, interval))
         job.sync(down=True)
         for qubit in qubits:
             target = qubit[0]
-            if target in targets:
-                stat, (i, o) = job.status(qubit, qbdict)
-                log("%12s (%s, %s): %s" % (stat, i, o, target))
-                if stat == 'up-to-date':
+            if target in targets and target not in rejects:
+                stat, (i, o, e) = job.status(qubit, qbdict)
+                log("%12s (%d, %d, %d): %s" % (stat, i, o, e, target))
+                if stat == 'completed':
+                    targets.remove(target)
+                elif stat == 'blocked' or stat == 'failed':
                     targets.remove(target)
                 elif stat == 'waiting':
                     pass
-                elif i == 0 or idle > stalled:
-                    job.punch_clock(qubit, True)
-                    qbcall(qubit)
-                    job.punch_clock(qubit, False)
+                elif i == e or idle > stalled:
+                    try:
+                        job.punch_clock(qubit, 1)
+                        qbcall(qubit)
+                        job.punch_clock(qubit, 0)
+                    except Reject:
+                        rejects.add(target)
+                        log(format_exc(), v=None)
+                        job.punch_clock(qubit, -1)
                     busy = True
                     break
         idle = 0 if busy else idle + 1
