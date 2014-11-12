@@ -220,7 +220,7 @@ conf = Config({
     'qpack': '.qpack',
     'qubits': '.qubits',
     'qspace': '.qspace',
-    'interval': 2,
+    'interval': 3,
     'stalled': 500,
     'jobroot': '/mnt',
     'jobprefix': 'qjob-',
