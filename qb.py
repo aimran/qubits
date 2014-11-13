@@ -466,7 +466,7 @@ def cli_sync(jobid=None):
     print(sync(jobid))
 
 def cli_check(jobid=None, qpack=None):
-    job = Job(conf, jobid or conf.jobspace().last())
+    job = Job(conf, sync(jobid or conf.jobspace().last()))
     for host, targets in job.bona_fides().items():
         print('%s:\t%s' % (host, ' '.join(targets)))
 
