@@ -23,6 +23,9 @@
 (qb sync [JOBID]) ->
     sync jobspace
 
+(qb check [JOBID]) ->
+    get bona fides
+
 (qb spawn [JOBID] [QPACK]) ->
     ssh each NODE:
      cd [JOBID] job directory
@@ -459,8 +462,13 @@ def cli_pack(*targets):
 def cli_seed(*targets):
     print(seed(targets))
 
-def cli_sync(qpack=None):
-    print(sync(qpack))
+def cli_sync(jobid=None):
+    print(sync(jobid))
+
+def cli_check(jobid=None, qpack=None):
+    job = Job(conf, jobid or conf.jobspace().last())
+    for host, targets in job.bona_fides().items():
+        print('%s:\t%s' % (host, ' '.join(targets)))
 
 def cli_spawn(jobid, qpack=None):
     print(spawn(jobid, qpack=None))
