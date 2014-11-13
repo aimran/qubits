@@ -59,7 +59,7 @@ from random import randint, sample
 from shutil import copytree, rmtree
 from subprocess import Popen, PIPE
 from traceback import format_exc
-from urllib import quote_plus
+from urllib import quote_plus, unquote_plus
 from warnings import warn
 
 def verbosity(level):
@@ -135,6 +135,13 @@ class Job(object):
     def punch_count(self, qubit):
         return self.jobspace.punch_count(self.id, qubit)
 
+    def bona_fides(self):
+        return self.jobspace.bona_fides(self.id)
+
+    @classmethod
+    def active(cls):
+        return cls(conf, conf['jobid'])
+
 class JobSpace(object):
     def __new__(cls, url, *args):
         if cls is JobSpace:
@@ -176,6 +183,18 @@ class FileJobSpace(JobSpace):
                     else:
                         o += 1
         return i, o, e
+
+    def bona_fides(self, jobid):
+        bfides = {}
+        subdir = os.path.join(self.path, jobid)
+        for worker in os.listdir(subdir):
+            host = unquote_plus(worker).split(':')[0]
+            card = bfides[host] = bfides.get(host, set())
+            for line in open(os.path.join(subdir, worker)):
+                t, target, inout = line.strip().split('\t')
+                if inout == '0':
+                    card.add(target)
+        return bfides
 
     def subspace(self, jobid):
         sh(('mkdir', '-p', os.path.join(self.path, jobid))).wait()
