@@ -117,6 +117,11 @@ class AWOL(Exception):
     def dstate(self):
         return self.args[0]
 
+class Deps(dict):
+    def workers(self, dep):
+        _, completed = self[dep]
+        return set(worker for worker, _, _ in completed)
+
 class Job(object):
     def __init__(self, conf, id=None):
         self.conf = conf
@@ -406,7 +411,7 @@ def qbname((target, (deps, do))):
     return do.__name__
 
 def qbcall((target, (deps, do)), dstates):
-    return do(target, dict(dstates)) if deps else do(target)
+    return do(target, Deps(dstates)) if deps else do(target)
 
 def wparse(wstr):
     return tuple(wstr.split(':'))
