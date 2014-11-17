@@ -406,7 +406,7 @@ def qbname((target, (deps, do))):
     return do.__name__
 
 def qbcall((target, (deps, do)), dstates):
-    return do(target, dict(dstates))
+    return do(target, dict(dstates)) if deps else do(target)
 
 def wparse(wstr):
     return tuple(wstr.split(':'))
