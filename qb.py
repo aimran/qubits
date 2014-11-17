@@ -23,8 +23,8 @@
 (qb sync [JOBID]) ->
     sync jobspace
 
-(qb check [JOBID]) ->
-    get bona fides
+(qb stat [JOBID]) ->
+    get who did what and when
 
 (qb spawn [JOBID] [QPACK]) ->
     ssh each NODE:
@@ -47,6 +47,9 @@
 (qb run [TARGETS]) ->
     qb pack TARGETS
     qb spawn `qb share`
+
+(qb clean) ->
+    clean entire jobspace
 """
 
 import os
@@ -56,8 +59,9 @@ import sys
 import time
 import uuid
 
+from collections import defaultdict
 from fnmatch import fnmatch
-from itertools import chain, groupby
+from itertools import chain, count, groupby
 from random import randint, sample
 from shutil import copytree, rmtree
 from subprocess import Popen, PIPE
@@ -81,24 +85,37 @@ def cat(data, proc):
     proc.stdin.close()
     proc.wait()
 
+def dead((host, pid)):
+    return sh(('ssh', host, 'ps %s' % pid), stdout=PIPE).wait()
+
 def pscp(src, dsts, scp='scp', P=16):
-    xargs = ('xargs', '-t') if verbosity(2) else ('xargs',)
+    xargs = ('xargs', '-t') if verbosity(3) else ('xargs',)
     scp = scp + ' -v' if conf.get('verbose') else scp + ' -q'
     proc = sh(xargs + ('-L', '1', '-P', str(P), 'bash', '-c', "%s $1 $2" % scp, '-'), stdin=PIPE)
     cat('\n'.join('%s\t%s' % (src, dst) for dst in dsts), proc)
 
 def pssh(orders, ssh='ssh', P=16):
-    xargs = ('xargs', '-t') if verbosity(2) else ('xargs',)
+    xargs = ('xargs', '-t') if verbosity(3) else ('xargs',)
     fmt = r"\e[35m@: %s \e[0m\n%s\n\e[36m?: %s\e[0m\n"
     enc = r"printf \"%s\" $1 \"\`(${*:2}) 2>&1\`\" \$?" % fmt
     proc = sh(xargs + ('-L', '1', '-P', str(P), 'bash', '-c', "%s $1 \"%s\"" % (ssh, enc), '-'), stdin=PIPE)
     cat('\n'.join('%s\t%s' % o for o in orders), proc)
 
+def aws(*args, **opts):
+    return sh(('aws',) + args + (() if verbosity(2) else ('--quiet', )), **opts).wait()
+
 def dotfile(path):
     return os.path.basename(path).startswith('.')
 
+def vclock_gte(a, b):
+    return a[:len(b)] == b
+
 class Reject(Exception):
     pass
+
+class AWOL(Exception):
+    def dstate(self):
+        return self.args[0]
 
 class Job(object):
     def __init__(self, conf, id=None):
@@ -116,30 +133,109 @@ class Job(object):
     def __exit__(self, *args):
         self.conf.pop('jobid') # cleanup
 
+    def __str__(self):
+        return self.id
+
     def status(self, qubit, qbdict):
-        i, o, e = self.punch_count(qubit)
-        if o:
-            return 'completed', (i, o, e)
-        if i == e == conf.expand('failed'):
-            return 'failed', (i, o, e)
-        statii = [self.status((d, qbdict[d]), qbdict) for d in qbdeps(qubit)]
-        if all(stat == 'completed' for stat, _ in statii):
-            return 'ready', (i, o, e)
-        if any(stat == 'failed' for stat, _ in statii):
-            return 'blocked', (i, o, e)
-        return 'waiting', (i, o, e)
+        target, deps = qbtarget(qubit), qbdeps(qubit)
+        cards = self.cache[target]
+        completed, active, rejected = [], [], 0
+        for worker, attempts in cards.items():
+            for i, (t, values) in attempts.items():
+                if values[-1] == 1:
+                    completed.append((worker, i, (t, values)))
+                elif values[-1] == 0:
+                    active.append((worker, i, (t, values)))
+                elif values[-1] < 0:
+                    rejected += 1
+        if completed:
+            return 'completed', completed
+        if active:
+            return 'active', active
+        if rejected >= conf.expand('failed'):
+            return 'failed', rejected
+
+        dstatii = [self.status((d, qbdict[d]), qbdict) for d in deps]
+        dstates = zip(deps, dstatii)
+        if all(tag == 'completed' for tag, _ in dstatii):
+            return 'ready', dstates
+        if any(tag == 'failed' for tag, _ in dstatii):
+            return 'blocked', dstates
+        return 'waiting', dstates
 
     def sync(self, up=False, down=False):
-        return self.jobspace.sync(self.id, up, down)
+        self.jobspace.sync(self.id, up, down)
+        if down: # safer to always update cache, but faster not to
+            self.cache = self.punch_cards()
 
-    def punch_clock(self, qubit, inout):
-        return self.jobspace.punch_clock(self.id, qubit, inout)
+    def punch_cards(self):
+        return self.jobspace.punch_cards(self.id)
 
-    def punch_count(self, qubit):
-        return self.jobspace.punch_count(self.id, qubit)
+    def punch_clock(self, target, state, code):
+        if code >= -2:
+            worker, i = '.', state
+            value = code
+        else:
+            worker, i, (t, values) = state
+            values.append(code) # updates cache
+            value = values
+        self.jobspace.punch_clock(self.id, target, worker, i, value)
+        self.sync(up=True, down=False)
 
-    def bona_fides(self):
-        return self.jobspace.bona_fides(self.id)
+    def loop(self, qubits):
+        idle = 0
+        interval = conf['interval']
+        stalled = conf['stalled']
+        qubits = list(qubits)
+        qbdict = dict(qubits)
+        formers = dict()
+        rejects = set()
+        for i in count():
+            log("@ %8d" % i, v=2)
+            busy = False
+            completed = 0
+            if idle:
+                time.sleep(interval + randint(0, interval))
+            self.sync(down=True)
+            for qubit in qubits:
+                target = qbtarget(qubit)
+                tag, state = self.status(qubit, qbdict)
+                if formers.get(target) != tag:
+                    log("%12s: %s" % (tag, target))
+                formers[target] = tag
+                if target in rejects:
+                    continue
+                elif tag == 'completed':
+                    completed += 1
+                elif tag == 'active':
+                    for att in state:
+                        worker, i, (t, values) = att
+                        if t - time.time() > stalled and dead(worker):
+                            self.punch_clock(target, att, -3)
+                elif tag == 'ready':
+                    try:
+                        self.punch_clock(target, i, 0)
+                        qbcall(qubit, state)
+                        self.punch_clock(target, i, +1)
+                    except Reject:
+                        rejects.add(target)
+                        log(format_exc(), v=None)
+                        self.punch_clock(target, i, -1)
+                    except AWOL, e:
+                        dep, (_tag, atts) = e.dstate()
+                        log("%12s: %s" % ('awol', dep))
+                        self.punch_clock(target, i, -2)
+                        self.punch_clock(dep, atts[-1], -4)
+                    else:
+                        self.sync(down=True)
+                    busy = True
+                elif tag == 'waiting':
+                    pass
+                elif tag == 'failed' or tag == 'blocked':
+                    return # game over
+            if completed == len(qubits) - len(rejects):
+                return # done
+            idle = 0 if busy else idle + 1
 
     @classmethod
     def active(cls):
@@ -166,38 +262,48 @@ class FileJobSpace(JobSpace):
         JobSpace.__init__(self, url, *args)
         self.path = self.url
 
-    def punch_clock(self, jobid, qubit, inout):
-        with open(os.path.join(self.path, jobid, quote_plus(self.worker)), 'a') as clock:
-            clock.write('%s\t%s\t%d\n' % (time.time(), qbtarget(qubit), inout))
-        self.sync(jobid, up=True, down=False)
+    def clean(self):
+        if os.path.exists(self.path):
+            rmtree(self.path)
+        return self.path
 
-    def punch_count(self, jobid, qubit):
-        i, o, e = 0, 0, 0
-        target = qbtarget(qubit)
+    def punch_cards(self, jobid):
+        dd = lambda t: lambda: defaultdict(t)
+        raw = defaultdict(dd(dd(dd(list))))
+        cards = defaultdict(dd(dict))
+        times = defaultdict(dd(dict))
         subdir = os.path.join(self.path, jobid)
-        for worker in os.listdir(subdir):
-            for line in open(os.path.join(subdir, worker)):
-                t, target_, inout = line.strip().split('\t')
-                if target == target_:
-                    if inout == '1':
-                        i += 1
-                    elif inout == '-1':
-                        e += 1
-                    else:
-                        o += 1
-        return i, o, e
+        for qwstr in os.listdir(subdir):
+            worker = wparse(unquote_plus(qwstr))
+            for line in open(os.path.join(subdir, qwstr)):
+                t, target, oworker, i, value = line.strip().split('\t')
+                t = float(t)
+                i = int(i)
+                if oworker == '.':
+                    raw[worker][oworker][target][i].append(int(value))
+                    times[target][worker][i] = t
+                else:
+                    raw[worker][wparse(oworker)][target][i] = map(int, value.split(','))
+                    times[target][worker][i] = times[target][worker].get(i, t)
+        for worker, oworkers in raw.items():
+            me = oworkers.pop('.', {})
+            for target, attempts in me.items():
+                for i, vclock in attempts.items():
+                    cards[target][worker][i] = (times[target][worker][i], vclock)
+            for oworker, targets in oworkers.items():
+                for target, attempts in targets.items():
+                    for i, vclock in attempts.items():
+                        t_ = times[target][worker][i]
+                        t, orig = cards[target][worker].get(i, (t_, []))
+                        if vclock_gte(vclock, orig): # NB: could wait for 'quorum'
+                            cards[target][worker][i] = (t, vclock)
+        return cards
 
-    def bona_fides(self, jobid):
-        bfides = {}
-        subdir = os.path.join(self.path, jobid)
-        for worker in os.listdir(subdir):
-            host = unquote_plus(worker).split(':')[0]
-            card = bfides[host] = bfides.get(host, set())
-            for line in open(os.path.join(subdir, worker)):
-                t, target, inout = line.strip().split('\t')
-                if inout == '0':
-                    card.add(target)
-        return bfides
+    def punch_clock(self, jobid, target, worker, i, value):
+        with open(os.path.join(self.path, jobid, quote_plus(wformat(self.worker))), 'a') as clock:
+            val = value if worker == '.' else ','.join(str(v) for v in value)
+            wrk = worker if worker == '.' else wformat(worker)
+            clock.write('%s\t%s\t%s\t%d\t%s\n' % (time.time(), target, wrk, i, val))
 
     def subspace(self, jobid):
         sh(('mkdir', '-p', os.path.join(self.path, jobid))).wait()
@@ -213,19 +319,23 @@ class S3JobSpace(FileJobSpace):
         FileJobSpace.__init__(self, url, *args)
         self.path = os.path.join(self.qspace, '-', quote_plus(self.url))
 
+    def clean(self):
+        FileJobSpace.clean(self)
+        aws('s3', 'rm', '--recursive', self.url)
+        return self.url
+
     def sync(self, jobid, up, down):
-        worker = quote_plus(self.worker)
+        host, pid = self.worker
+        wpath = os.path.join(quote_plus(wformat((host, pid))))
+        wpre = os.path.join(quote_plus(wformat((host, ''))))
         if up:
-            sh(('aws', 's3', 'cp', ) +
-               (() if verbosity(2) else ('--quiet', )) +
-               (os.path.join(self.path, jobid, worker),
-                os.path.join(self.url, jobid, worker))).wait()
+            aws('s3', 'cp',
+                os.path.join(self.path, jobid, wpath),
+                os.path.join(self.url, jobid, wpath))
         if down:
-            sh(('aws', 's3', 'sync', ) +
-               (() if verbosity(2) else ('--quiet', )) +
-               ('--exclude', worker,
+            aws('s3', 'sync', '--exclude', '*/' + wpre + '*',
                 os.path.join(self.url, jobid),
-                os.path.join(self.path, jobid))).wait()
+                os.path.join(self.path, jobid))
 
 class Config(dict):
     def __call__(self, key):
@@ -255,11 +365,11 @@ conf = Config({
     'qspace': '.qspace',
     'failed': lambda: sum(nmax for _, nmax in conf.expand('nodes')),
     'interval': 10,
-    'stalled': 100,
+    'stalled': 20 * 60,
     'jobroot': '/mnt',
     'jobprefix': 'qjob-',
     'nodes': [('localhost', 2)],
-    'worker': '%s:%s' % (socket.gethostname(), os.getpid()),
+    'worker': (socket.gethostname(), str(os.getpid())),
     'spawnlog': 'spawn.log',
 })
 rules = []
@@ -295,8 +405,14 @@ def qbdeps((target, (deps, do))):
 def qbname((target, (deps, do))):
     return do.__name__
 
-def qbcall((target, (deps, do))):
-    return do(target, *deps)
+def qbcall((target, (deps, do)), dstates):
+    return do(target, dict(dstates))
+
+def wparse(wstr):
+    return tuple(wstr.split(':'))
+
+def wformat(worker):
+    return '%s:%s' % worker
 
 def expand(deps, m=None):
     if callable(deps):
@@ -328,47 +444,10 @@ def qubits_(target, qubits=None, ancestors=(), rules=rules):
 def qubits(targets=(), rules=rules):
     return sum((qubits_(t, rules=rules).items() for t in targets or ('default',)), [])
 
-def loop(qubits, job):
-    idle = 0
-    stalled = conf['stalled']
-    interval = conf['interval']
-    qubits = list(qubits)
-    qbdict = dict(qubits)
-    targets = set(t for t, _ in qubits)
-    rejects = set()
-    while targets - rejects:
-        busy = False
-        if idle:
-            time.sleep(interval + randint(0, interval))
-        job.sync(down=True)
-        for qubit in qubits:
-            target = qubit[0]
-            if target in targets and target not in rejects:
-                stat, (i, o, e) = job.status(qubit, qbdict)
-                log("%12s (%d, %d, %d): %s" % (stat, i, o, e, target))
-                if stat == 'completed':
-                    targets.remove(target)
-                elif stat == 'blocked' or stat == 'failed':
-                    targets.remove(target)
-                elif stat == 'waiting':
-                    pass
-                elif i == e or idle > stalled:
-                    try:
-                        job.punch_clock(qubit, 1)
-                        qbcall(qubit)
-                        job.punch_clock(qubit, 0)
-                    except Reject:
-                        rejects.add(target)
-                        log(format_exc(), v=None)
-                        job.punch_clock(qubit, -1)
-                    busy = True
-                    break
-        idle = 0 if busy else idle + 1
-
 def make(targets=()):
     with Job(conf, id=conf['parent']) as job:
-        loop(qubits(targets, rules), job)
-    return job.id
+        job.loop(qubits(targets, rules))
+    return job
 
 def pack(targets=()):
     qp = conf['qpack']
@@ -389,14 +468,14 @@ def seed(targets=()):
     qb = [t for t in qd if t not in targets]
     ts = chain(targets, sample(qb, len(qb)))
     with Job(conf, id=conf['parent']) as job:
-        loop(((t, qd[t]) for t in ts), job)
-    return job.id
+        job.loop(((t, qd[t]) for t in ts))
+    return job
 
 def sync(jobid=None):
     jobid = jobid or conf.jobspace().last()
     with Job(conf, id=jobid) as job:
         job.sync(down=True)
-    return jobid
+    return job
 
 def spawn(jobid, qpack=None):
     qp = qpack or conf['qpack']
@@ -417,7 +496,7 @@ def spawn(jobid, qpack=None):
         pssh(((addr, 'cd %s; %s; echo ok' %
                (conf.jobdir(job.id), '; '.join(plant(ts) for _addr, ts in group if ts)))
               for addr, group in groupby(ps, lambda (k, v): k)))
-    return jobid
+    return job
 
 def share(qpack=None):
     qp = qpack or conf['qpack']
@@ -426,7 +505,7 @@ def share(qpack=None):
              ('%s:%s' % (addr, conf.jobdir(job.id))
               for addr, nmax in conf.expand('nodes')),
              scp='rsync -az')
-    return job.id
+    return job
 
 def kill(jobish=None, signal='KILL'):
     flags = ('-j %s' % jobish) if jobish else ''
@@ -436,7 +515,7 @@ def kill(jobish=None, signal='KILL'):
 
 def run(targets=()):
     qpack = pack(targets)
-    return spawn(share(qpack), qpack)
+    return spawn(share(qpack).id, qpack)
 
 def load(filename='Qfile'):
     import imp
@@ -465,10 +544,12 @@ def cli_seed(*targets):
 def cli_sync(jobid=None):
     print(sync(jobid))
 
-def cli_check(jobid=None, qpack=None):
-    job = Job(conf, sync(jobid or conf.jobspace().last()))
-    for host, targets in job.bona_fides().items():
-        print('%s:\t%s' % (host, ' '.join(targets)))
+def cli_stat(jobid=None):
+    job = sync(jobid or conf.jobspace().last())
+    for target, workers in job.cache.items():
+        for worker, attempts in workers.items():
+            for i, (t, values) in attempts.items():
+                print("%.2f\t%30s\t%50s\t%10s" % (t, wformat(worker), target, values))
 
 def cli_spawn(jobid, qpack=None):
     print(spawn(jobid, qpack=None))
@@ -484,6 +565,9 @@ def cli_kill(jobish=None, signal=None):
 
 def cli_run(*targets):
     print(run(targets))
+
+def cli_clean():
+    print(conf.jobspace().clean())
 
 def cli_help(*args):
     print(__doc__.strip())
