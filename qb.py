@@ -88,13 +88,13 @@ def cat(data, proc):
 def dead((host, pid)):
     return sh(('ssh', host, 'ps %s' % pid), stdout=PIPE).wait()
 
-def pscp(src, dsts, scp='scp', P=16):
+def pscp(src, dsts, scp='scp', P=32):
     xargs = ('xargs', '-t') if verbosity(3) else ('xargs',)
     scp = scp + ' -v' if conf.get('verbose') else scp + ' -q'
     proc = sh(xargs + ('-L', '1', '-P', str(P), 'bash', '-c', "%s $1 $2" % scp, '-'), stdin=PIPE)
     cat('\n'.join('%s\t%s' % (src, dst) for dst in dsts), proc)
 
-def pssh(orders, ssh='ssh', P=16):
+def pssh(orders, ssh='ssh', P=32):
     xargs = ('xargs', '-t') if verbosity(3) else ('xargs',)
     fmt = r"\e[35m@: %s \e[0m\n%s\n\e[36m?: %s\e[0m\n"
     enc = r"printf \"%s\" $1 \"\`(${*:2}) 2>&1\`\" \$?" % fmt
