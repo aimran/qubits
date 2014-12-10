@@ -285,10 +285,10 @@ class FileJobSpace(JobSpace):
                 t = float(t)
                 i = int(i)
                 if oworker == '.':
-                    raw[worker][oworker][target][i].append(int(value))
+                    raw[worker]['.'][target][i].append(int(value))
                     times[target][worker][i] = t
                 else:
-                    raw[worker][wparse(oworker)][target][i] = map(int, value.split(','))
+                    raw[wparse(oworker)][worker][target][i] = map(int, value.split(','))
                     times[target][worker][i] = times[target][worker].get(i, t)
         for worker, oworkers in raw.items():
             me = oworkers.pop('.', {})
