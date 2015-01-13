@@ -215,7 +215,7 @@ class Job(object):
                 elif tag == 'active':
                     for att in state:
                         worker, i, (t, values) = att
-                        if t - time.time() > stalled and dead(worker):
+                        if time.time() - t > stalled and dead(worker):
                             self.punch_clock(target, att, -3)
                 elif tag == 'ready':
                     try:
